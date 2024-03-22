@@ -1,43 +1,29 @@
 import argparse
-import numpy as np
+import pandas as pd
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--prefix", default="")
 
+TOTAL_STATES = 1500
+
 if __name__ == "__main__":
     args = parser.parse_args()
-    all_results = None
 
+    results = {}
     for shard in range(1, 7):
-        shard_results = {}
-        with open(f'{args.prefix}{shard}.txt') as f:
-            current = []
-            qubits = None
-            for line in f.readlines():
-                if line.startswith("-"):
-                    shard_results[qubits] = np.array(current)
-                    qubits = None
-                    current = []
-                elif qubits is not None:
-                    current.append(list(map(int, line.strip().split(","))))
-                else:
-                    qubits = int(line.strip().partition("=")[2])
-        if all_results is not None:
-            for qubit in all_results:
-                all_results[qubit] += shard_results[qubit]
-        else:
-            all_results = shard_results
+        for qubits in range(2, 7):
+            try:
+                df = pd.read_csv(f'{args.prefix}{qubits}_{shard}.csv', names=['random', 'optimal', 'tree', 'forest'])
+            except FileNotFoundError:
+                break
+            if shard == 1:
+                results[qubits] = df
+            else:
+                results[qubits] += df
 
-    for qubit in all_results:
-        avg = np.sum(np.diff(np.transpose(all_results[qubit])) * np.arange(1, 3**qubit), axis=1) / 2100
-        print(f"{qubit} & {avg[3]:.2f} & {avg[2]:.2f} & {avg[2]-avg[3]:.2f} & {avg[0]:.2f} & {avg[1]:.2f} \\\\")
-
-    for qubit in all_results:
-        with open(f'access{qubit}.txt', 'w') as f:
-            f.write("steps,random,optimal,laskowski,forest\n")
-            m = 1
-            for row in all_results[qubit]:
-                f.write(f"{m},{','.join(map(str,row))}\n")
-                if all(s == 2100 for s in row):
-                    break
-                m += 1
+    for qubits, qubit_results in results.items():
+        avg = qubit_results.diff().mul(range(len(qubit_results)), axis=0).sum(axis=0, skipna=True) / TOTAL_STATES
+        col_values = [avg['forest'], avg['tree'], avg['tree'] - avg['forest'], avg['optimal'], avg['random']]
+        print(" & ".join([str(qubits)] + [f"{v:.2f}" for v in col_values]) + " \\\\")
+        qubit_results = qubit_results[:qubit_results[(qubit_results == TOTAL_STATES).all(axis=1)].index[0] + 1]
+        qubit_results.to_csv(f"access_{qubits}.csv")

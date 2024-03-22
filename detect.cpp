@@ -30,6 +30,8 @@ template<class T> std::vector<T> read_vec_from_line(std::string line, int sz=0)
 
 std::vector<std::vector<int>> read_cliques(int qubits)
 {
+    if(qubits == 2) return std::vector<std::vector<int>>();
+
     std::stringstream clique_filename;
     clique_filename << "cliques/cliques_" << qubits << ".csv";
     std::ifstream clique_file(clique_filename.str());
@@ -80,20 +82,43 @@ int lask_detect(
     const std::vector<std::vector<int>> &anticommuting_map)
 {
     tracker_t tracker;
-    int n_cliques = all_cliques.size(), clique_sz = all_cliques[0].size();
-    // i tracks which clique, j tracks location within clique i
-    int i = 0, j = 0, op = 0;
-   
+    int n_cliques = all_cliques.size(), op;
+    double measurement_value;
     std::vector<double> prio(x.size(), 0.0);
-    while(i < n_cliques && j < clique_sz)
+    
+    if(n_cliques == 0)
     {
-        op = all_cliques[i][j];
-        double measurement_value = tracker.do_measurement(x, op);
-        update_priorities(prio, op, measurement_value, anticommuting_map);
-        if(tracker.total > 1.0) break;
-        if (measurement_value > 0.16) ++j;
-        else if(++i < n_cliques)
-            for(j = 0; j < clique_sz; ++j) if(all_cliques[i][j] != all_cliques[i-1][j]) break;
+        int state_op[6] = {0, 4, 8, 5, 7, -1};
+        int state = 0;
+        for (op = state_op[state]; op > 0; op = state_op[state])
+        {
+            measurement_value = tracker.do_measurement(x, op);
+            update_priorities(prio, op, measurement_value, anticommuting_map);
+            if(tracker.total > 1.0) break;
+            switch(state)
+            {
+                case 0: state = 1; break;
+                case 1: state = measurement_value > 0.16 ? 2 : 3; break;
+                case 2: state = 5; break;
+                case 3: state = measurement_value > 0.16 ? 4 : 5; break;
+                case 4: state = 5; break;
+            }
+        }
+    } else {
+         
+        // i tracks which clique, j tracks location within clique i
+        int i = 0, j = 0, clique_sz = all_cliques[0].size(); 
+        while(i < n_cliques && j < clique_sz)
+        {
+            op = all_cliques[i][j];
+            measurement_value = tracker.do_measurement(x, op);
+            update_priorities(prio, op, measurement_value, anticommuting_map);
+            if(tracker.total > 1.0) break;
+            if (measurement_value > 0.16) ++j;
+            else if(++i < n_cliques)
+                for(j = 0; j < clique_sz; ++j)
+                    if (prio[all_cliques[i][j]] < 10000.0 && all_cliques[i][j] != all_cliques[i-1][j]) break;
+        }
     }
     while(tracker.total <= 1.0)
     {
@@ -185,23 +210,17 @@ typedef std::vector<tree_mask_t> forest_mask_t;
 
 double avg_priority(const forest_mask_t &forest_mask)
 {
-    std::vector<double> scores;
-    scores.reserve(forest_mask.size());
-
-    for (tree_mask_t mask: forest_mask) 
-        if(mask.p > 0 && mask.n > 0) 
-            scores.push_back(((double) mask.p) / (mask.p + mask.n));
-    std::sort(scores.begin(), scores.end(), std::greater<double>());
-    
-    // Try olympic average to smooth out sample noise    
-    int sz = scores.size(), mid_q = sz >> 3;
     int count = 0;
     double total = 0.0;
-    for(int i = mid_q; i < sz - mid_q; ++i)
+    for (tree_mask_t mask: forest_mask) 
     {
-        ++count;
-        total += scores[i];
+        if(mask.p > 0 && mask.n > 0) 
+        {
+            total += ((double) mask.p) / (mask.p + mask.n);
+            ++count;
+        }
     }
+    if(count == 0) return 1.0;
     return total / count;
 }
 
@@ -346,14 +365,14 @@ Eigen::SparseMatrix<cd_t> gen_cnot(int ctl_sys, int op_sys, int qubits)
 
 std::vector<double> sample_computable(const std::vector<Eigen::MatrixXcd> &b, int qubits, int shard)
 {
-    int N = b[0].rows(), n_gates = 12 * qubits * qubits, lb_gates = n_gates >> 1, count = 0;
+    int N = b[0].rows(), n_gates = 6 * qubits * qubits + 54, lb_gates = n_gates >> 1, count = 0;
 
-    static std::default_random_engine generator({(long unsigned int) shard});
+    static std::default_random_engine generator({(long unsigned int) qubits * shard});
     static std::uniform_int_distribution<int> gate_chooser(0, 2);
     std::uniform_int_distribution<int> system_chooser(0, qubits - 1);
     std::uniform_int_distribution<int> continue_chooser(0, lb_gates - 1);
 
-    Eigen::SparseMatrix<cd_t> G(N, N);
+    Eigen::MatrixXcd G(N, N);
     G.setIdentity();
     while((count++ < lb_gates) || (continue_chooser(generator) > 0))
     {
@@ -403,7 +422,7 @@ int main(int argc, char *argv[])
         return 0;
     }
     int shard = atoi(argv[1]);
-    int qubits = (argc == 3) ? atoi(argv[2]) : 3;
+    int qubits = (argc == 3) ? atoi(argv[2]) : 2;
     for(; qubits < 7; ++qubits){
         int_map_t vecix_to_bitstr;
         int_map_t bitstr_to_vecix;
@@ -415,40 +434,52 @@ int main(int argc, char *argv[])
 
         std::vector<forest_t> all_forests = load_all_forests(qubits, b.size());
         
-        std::vector<int> random_res(b.size(), 0);
-        std::vector<int> optimal_res(b.size(), 0);
-        std::vector<int> lask_res(b.size(), 0);
-        std::vector<int> forest_res(b.size(), 0);
-        for(int i = 0; i < 350; ++i)
+        std::vector<int> random_res(b.size() + 1, 0);
+        std::vector<int> optimal_res(b.size() + 1, 0);
+        std::vector<int> lask_res(b.size() + 1, 0);
+        std::vector<int> forest_res(b.size() + 1, 0);
+        for(int i = 0; i < 250; ++i)
         {
-            std::vector<double> x = sample_computable(b, qubits, shard);
-            int max_ix = std::distance(x.begin(), std::max_element(x.begin(), x.end()));
-            rotate(    
-                x,
-                vecix_to_bitstr.find(max_ix)->second, 
-                vecix_to_bitstr.find(0)->second, 
-                qubits,
-                b.size(), 
-                vecix_to_bitstr, 
-                bitstr_to_vecix
-            );
+            std::vector<double> x;
+            double total;
+            do {
+                x = sample_computable(b, qubits, shard);
+                int max_ix = std::distance(x.begin(), std::max_element(x.begin(), x.end()));
+                rotate( 
+                    x,
+                    vecix_to_bitstr.find(max_ix)->second, 
+                    vecix_to_bitstr.find(0)->second, 
+                    qubits,
+                    b.size(), 
+                    vecix_to_bitstr, 
+                    bitstr_to_vecix
+                );
+                total = 0;
+                // possible get xx...x >= 1 in some pathological case
+                // also want to throw out these samples.
+                for(double v: x) total += (v < 1.0 ? v : -99999.0);
+            } while (total <= 1.0);
             random_res[random_detect(x)]++;
             optimal_res[optimal_detect(x)]++;
             lask_res[lask_detect(x, all_cliques, anticommuting_map)]++; 
             forest_res[forest_detect(x, all_forests)]++;
+            if((i % 10) == 0) std::cout << "Shard: " << shard << ", Qubit = " << qubits << ", At: " << i << std::endl;
         }
-        std::cout << "qubits = " << qubits << std::endl;
-        for(int i = 1; i < b.size(); ++i)
+        std::cout << "Shard: " << shard << ", Qubit = " << qubits << ", Done!" << std::endl;
+        
+        std::stringstream out_filename;
+        out_filename << "results/" << qubits << "_" << shard << ".csv";
+        std::ofstream outfile;
+        outfile.open(out_filename.str());
+        for(int i = 1; i < b.size() + 1; ++i)
         {
             random_res[i] += random_res[i-1];
             optimal_res[i] += optimal_res[i-1];
             lask_res[i] += lask_res[i-1];
             forest_res[i] += forest_res[i-1];
         }
-        for(int i = 0; i < b.size(); ++i)
-            std::cout << random_res[i] << "," << optimal_res[i] << "," 
-                      << lask_res[i] << "," << forest_res[i] << std::endl;
-        std::cout << "------" << std::endl;
+        for(int i = 0; i < b.size() + 1; ++i)
+            outfile << random_res[i] << "," << optimal_res[i] << "," << lask_res[i] << "," << forest_res[i] << "\n";
     }
     return 0;
 }
